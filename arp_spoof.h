@@ -25,8 +25,8 @@ struct arphdr_bot{
 }__attribute__((packed));
 
 struct packetinfo{
-    unsigned char   eth_sha[ETH_ALEN];  /* source hardware address  */
-    unsigned char   eth_dha[ETH_ALEN];  /* destination hardware address */
+    unsigned char   eth_dha[ETH_ALEN];  /* source hardware address  */
+    unsigned char   eth_sha[ETH_ALEN];  /* destination hardware address */
     __be16  eth_proto; /*  ethernet protocol   */
     __be16  ar_op;  /*  arp opcode  */
     unsigned char	ar_sha[ETH_ALEN];	/* sender hardware address	*/
